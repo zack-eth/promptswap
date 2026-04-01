@@ -1,0 +1,24 @@
+{
+  "name": "promptswap",
+  "version": "0.1.7",
+  "description": "Peer-to-peer prompt marketplace — trade LLM capacity with swap credits",
+  "type": "module",
+  "bin": {
+    "promptswap": "./bin/promptswap.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "skills/"
+  ],
+  "dependencies": {},
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zack-eth/promptswap.git"
+  },
+  "keywords": ["llm", "prompt", "marketplace", "swap", "ollama", "claude"],
+  "license": "MIT"
+}
