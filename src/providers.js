@@ -54,8 +54,35 @@ const PROVIDERS = {
   },
   codex: {
     tags: ["codex"],
+    async runAsync(prompt) {
+      // Use codex exec for non-interactive, scripted execution
+      const tmpFile = join(homedir(), ".promptswap", `codex-${Date.now()}.txt`);
+      const { execFile } = await import("child_process");
+      const { readFileSync, unlinkSync } = await import("fs");
+      return new Promise((resolve, reject) => {
+        const child = execFile(
+          "codex",
+          ["exec", "--full-auto", "-o", tmpFile, prompt],
+          { timeout: 120_000, maxBuffer: 1024 * 1024, cwd: "/tmp" },
+          (err) => {
+            if (err) {
+              // Clean up temp file on error
+              try { unlinkSync(tmpFile); } catch {}
+              return reject(new Error(`Codex failed: ${err.message}`));
+            }
+            try {
+              const result = readFileSync(tmpFile, "utf-8").trim();
+              unlinkSync(tmpFile);
+              resolve(result);
+            } catch (e) {
+              reject(new Error(`Failed to read Codex output: ${e.message}`));
+            }
+          }
+        );
+      });
+    },
     run(prompt) {
-      return exec(`codex -q ${shellEscape(prompt)}`);
+      return exec(`codex exec --full-auto ${shellEscape(prompt)}`);
     },
     modelForTag() {
       return null;
