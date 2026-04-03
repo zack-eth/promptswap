@@ -11,6 +11,9 @@
     "src/",
     "skills/"
   ],
+  "scripts": {
+    "test": "node --test test/test.js"
+  },
   "dependencies": {},
   "engines": {
     "node": ">=18"
