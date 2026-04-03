@@ -67,6 +67,8 @@ export function createPipeline(input, stages, opts = {}) {
         max_retries: s.max_retries ?? 2,
         timeout_ms: s.timeout_ms || 120000,
         fallback: s.fallback || null,
+        redundancy: s.redundancy || 1,
+        verify: s.verify || "majority",
       },
       campaign_id: null,
       output: null,

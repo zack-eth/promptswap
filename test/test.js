@@ -911,3 +911,160 @@ describe("pipeline", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// verify.js — verification strategy tests
+// ---------------------------------------------------------------------------
+
+import { STRATEGIES, DEFAULT_MIN_CONFIDENCE } from "../src/verify.js";
+
+describe("verify", () => {
+  describe("majority", () => {
+    it("picks the most common result", () => {
+      const v = STRATEGIES.majority(["a", "b", "a", "a", "b"]);
+      assert.equal(v.result, "a");
+      assert.equal(v.agreement, 3);
+      assert.equal(v.total, 5);
+      assert.equal(v.confidence, 3 / 5);
+    });
+
+    it("works with unanimous results", () => {
+      const v = STRATEGIES.majority(["x", "x", "x"]);
+      assert.equal(v.result, "x");
+      assert.equal(v.confidence, 1.0);
+    });
+
+    it("picks one when tied", () => {
+      const v = STRATEGIES.majority(["a", "b"]);
+      assert.ok(["a", "b"].includes(v.result));
+      assert.equal(v.confidence, 0.5);
+    });
+
+    it("works with single result", () => {
+      const v = STRATEGIES.majority(["only"]);
+      assert.equal(v.result, "only");
+      assert.equal(v.confidence, 1.0);
+    });
+  });
+
+  describe("consensus", () => {
+    it("returns result when all agree", () => {
+      const v = STRATEGIES.consensus(["same", "same", "same"]);
+      assert.equal(v.result, "same");
+      assert.equal(v.confidence, 1.0);
+      assert.equal(v.agreement, 3);
+    });
+
+    it("returns null when results differ", () => {
+      const v = STRATEGIES.consensus(["a", "b", "a"]);
+      assert.equal(v.result, null);
+      assert.equal(v.confidence, 0);
+    });
+
+    it("returns result for single submission", () => {
+      const v = STRATEGIES.consensus(["only"]);
+      assert.equal(v.result, "only");
+      assert.equal(v.confidence, 1.0);
+    });
+  });
+
+  describe("fuzzy", () => {
+    it("matches despite case differences", () => {
+      const v = STRATEGIES.fuzzy(["Hello World", "hello world", "HELLO WORLD"]);
+      assert.equal(v.confidence, 1.0);
+      assert.ok(v.result); // returns one of the originals
+    });
+
+    it("matches despite whitespace differences", () => {
+      const v = STRATEGIES.fuzzy(["hello  world", "hello world", "hello   world"]);
+      assert.equal(v.confidence, 1.0);
+    });
+
+    it("matches despite punctuation differences", () => {
+      const v = STRATEGIES.fuzzy(["hello, world!", "hello world", "hello world."]);
+      assert.equal(v.confidence, 1.0);
+    });
+
+    it("distinguishes genuinely different results", () => {
+      const v = STRATEGIES.fuzzy(["cats are great", "dogs are great", "cats are great"]);
+      assert.equal(v.confidence, 2 / 3);
+      assert.ok(v.result.toLowerCase().includes("cats"));
+    });
+  });
+
+  describe("longest", () => {
+    it("picks the longest result", () => {
+      const v = STRATEGIES.longest(["short", "medium length", "the longest result here"]);
+      assert.equal(v.result, "the longest result here");
+    });
+
+    it("confidence is always 1/N", () => {
+      const v = STRATEGIES.longest(["a", "bb", "ccc"]);
+      assert.equal(v.confidence, 1 / 3);
+    });
+  });
+
+  describe("DEFAULT_MIN_CONFIDENCE", () => {
+    it("is 0.5", () => {
+      assert.equal(DEFAULT_MIN_CONFIDENCE, 0.5);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// campaign.js — redundancy config tests
+// ---------------------------------------------------------------------------
+
+describe("campaign redundancy", () => {
+  const campaignsDir = join(homedir(), ".promptswap", "campaigns");
+
+  it("stores redundancy config", () => {
+    const campaign = createCampaign("a\nb", {
+      splitter: "lines",
+      reducer: "concat",
+      tag: "prompt",
+      redundancy: 3,
+      verify: "consensus",
+      min_confidence: 0.8,
+    });
+    assert.equal(campaign.config.redundancy, 3);
+    assert.equal(campaign.config.verify, "consensus");
+    assert.equal(campaign.config.min_confidence, 0.8);
+    try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+  });
+
+  it("defaults redundancy to 1", () => {
+    const campaign = createCampaign("a\nb", {
+      splitter: "lines",
+      reducer: "concat",
+    });
+    assert.equal(campaign.config.redundancy, 1);
+    try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+  });
+
+  it("tasks have empty submissions array", () => {
+    const campaign = createCampaign("a\nb", {
+      splitter: "lines",
+      reducer: "concat",
+      redundancy: 3,
+    });
+    for (const task of campaign.tasks) {
+      assert.ok(Array.isArray(task.submissions));
+      assert.equal(task.submissions.length, 0);
+      assert.equal(task.verification, null);
+    }
+    try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+  });
+
+  it("shows redundancy in creation message", () => {
+    // Just verify it doesn't crash with redundancy config
+    const campaign = createCampaign("x\ny\nz", {
+      splitter: "lines",
+      reducer: "concat",
+      redundancy: 3,
+      verify: "fuzzy",
+    });
+    assert.equal(campaign.tasks.length, 3);
+    try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+  });
+});

@@ -5,6 +5,7 @@ import { join } from "path";
 import { NetwircAPI } from "./api.js";
 import { SPLITTERS, applyTemplate } from "./splitters.js";
 import { REDUCERS } from "./reducers.js";
+import { STRATEGIES, DEFAULT_MIN_CONFIDENCE } from "./verify.js";
 
 const CAMPAIGNS_DIR = join(homedir(), ".promptswap", "campaigns");
 
@@ -35,12 +36,14 @@ function computeStats(campaign) {
   const failed = tasks.filter((t) => t.status === "failed");
   const pending = tasks.filter((t) => t.status === "pending");
   const submitted = tasks.filter((t) => t.status === "submitted");
+  const disputed = tasks.filter((t) => t.status === "disputed");
   return {
     total: tasks.length,
     completed: completed.length,
     failed: failed.length,
     pending: pending.length,
     submitted: submitted.length,
+    disputed: disputed.length,
     swap_credits_used: campaign.stats?.swap_credits_used || 0,
     spent_cents: campaign.stats?.spent_cents || 0,
     started_at: campaign.stats?.started_at || null,
@@ -58,6 +61,8 @@ export function createCampaign(input, config) {
   const chunks = splitter(input, config.splitter_opts || {});
   if (chunks.length === 0) throw new Error("Splitter produced 0 tasks — check your input");
 
+  const redundancy = config.redundancy || 1;
+
   const tasks = chunks.map((chunk, index) => ({
     index,
     prompt: applyTemplate(config.template, chunk),
@@ -68,6 +73,9 @@ export function createCampaign(input, config) {
     attempts: 0,
     submitted_at: null,
     completed_at: null,
+    // Verification fields (only used when redundancy > 1)
+    submissions: [],
+    verification: null,
   }));
 
   const id = "camp_" + randomBytes(4).toString("hex");
@@ -92,6 +100,9 @@ export function createCampaign(input, config) {
       timeout_ms: config.timeout_ms || 120000,
       max_budget_cents: config.max_budget_cents || 0,
       fallback: config.fallback || null,
+      redundancy: config.redundancy || 1,
+      verify: config.verify || "majority",
+      min_confidence: config.min_confidence ?? DEFAULT_MIN_CONFIDENCE,
     },
     tasks,
     stats: {},
@@ -100,7 +111,8 @@ export function createCampaign(input, config) {
   campaign.stats = computeStats(campaign);
   saveCampaign(campaign);
 
-  process.stderr.write(`Campaign ${id}: ${tasks.length} tasks created (${config.splitter} splitter)\n`);
+  const redInfo = redundancy > 1 ? `, ${redundancy}x redundancy, ${config.verify || "majority"} verification` : "";
+  process.stderr.write(`Campaign ${id}: ${tasks.length} tasks created (${config.splitter} splitter${redInfo})\n`);
   return campaign;
 }
 
@@ -165,14 +177,28 @@ export async function runCampaign(id, serverConfig) {
   let consecutiveTimeouts = 0;
   let lastSave = Date.now();
 
-  while (!paused && hasPendingOrSubmitted(campaign)) {
-    // Submit new tasks up to concurrency limit
-    const inFlight = campaign.tasks.filter((t) => t.status === "submitted").length;
-    let toSubmit = cfg.max_concurrent - inFlight;
+  const redundancy = cfg.redundancy || 1;
+  const verifyStrategy = STRATEGIES[cfg.verify] || STRATEGIES.majority;
 
-    while (toSubmit > 0) {
-      const task = campaign.tasks.find((t) => t.status === "pending" && t.attempts <= cfg.max_retries);
-      if (!task) break;
+  while (!paused && hasPendingOrSubmitted(campaign)) {
+    // Count total in-flight submissions across all tasks
+    const totalInFlight = campaign.tasks.reduce((n, t) => {
+      return n + (t.submissions || []).filter((s) => s.status === "submitted").length;
+    }, 0);
+    let slotsAvailable = cfg.max_concurrent - totalInFlight;
+
+    // Submit new submissions for tasks that need them
+    for (const task of campaign.tasks) {
+      if (slotsAvailable <= 0) break;
+      if (task.status === "completed" || task.status === "failed") continue;
+      if (task.attempts > cfg.max_retries) { task.status = "failed"; continue; }
+
+      // How many submissions does this task still need?
+      if (!task.submissions) task.submissions = [];
+      const delivered = task.submissions.filter((s) => s.status === "delivered").length;
+      const inFlight = task.submissions.filter((s) => s.status === "submitted").length;
+      const needed = redundancy - delivered - inFlight;
+      if (needed <= 0) continue;
 
       // Budget check
       if (cfg.max_budget_cents > 0 && campaign.stats.spent_cents + cfg.price_cents > cfg.max_budget_cents) {
@@ -182,84 +208,150 @@ export async function runCampaign(id, serverConfig) {
         break;
       }
 
-      try {
-        let job;
-        if (cfg.swap) {
-          try {
-            job = await api.quickJob(cfg.tag, task.prompt, 0, cfg.seller, { swap: true });
-          } catch {
+      const toSend = Math.min(needed, slotsAvailable);
+      for (let s = 0; s < toSend; s++) {
+        try {
+          let job;
+          if (cfg.swap) {
+            try {
+              job = await api.quickJob(cfg.tag, task.prompt, 0, cfg.seller, { swap: true });
+            } catch {
+              job = await api.quickJob(cfg.tag, task.prompt, cfg.price_cents, cfg.seller);
+            }
+          } else {
             job = await api.quickJob(cfg.tag, task.prompt, cfg.price_cents, cfg.seller);
           }
-        } else {
-          job = await api.quickJob(cfg.tag, task.prompt, cfg.price_cents, cfg.seller);
-        }
 
-        task.job_id = job.id;
-        task.status = "submitted";
-        task.submitted_at = new Date().toISOString();
+          const sub = { job_id: job.id, status: "submitted", result: null, seller: job.seller || null, submitted_at: new Date().toISOString() };
 
-        // Check for immediate delivery
-        if (job.delivery_body) {
-          if (isErrorResult(job.delivery_body)) {
-            task.status = "pending";
-            task.attempts++;
-            task.error = job.delivery_body;
-          } else {
-            task.status = "completed";
-            task.result = job.delivery_body;
-            task.completed_at = new Date().toISOString();
-            if (job.swap) campaign.stats.swap_credits_used += job.swap_credit_cost || 1;
-            else campaign.stats.spent_cents += job.price_cents || cfg.price_cents;
+          // Check for immediate delivery
+          if (job.delivery_body) {
+            if (isErrorResult(job.delivery_body)) {
+              sub.status = "failed";
+              sub.error = job.delivery_body;
+            } else {
+              sub.status = "delivered";
+              sub.result = job.delivery_body;
+              if (job.swap) campaign.stats.swap_credits_used += job.swap_credit_cost || 1;
+              else campaign.stats.spent_cents += job.price_cents || cfg.price_cents;
+            }
           }
-        }
-      } catch (err) {
-        task.attempts++;
-        task.error = err.message;
-        if (task.attempts > cfg.max_retries) task.status = "failed";
-      }
-      toSubmit--;
-    }
 
-    // Mark pending tasks that exceeded max_retries as failed
-    for (const task of campaign.tasks) {
-      if (task.status === "pending" && task.attempts > cfg.max_retries) {
-        task.status = "failed";
-      }
-    }
-
-    // Poll all submitted tasks
-    for (const task of campaign.tasks.filter((t) => t.status === "submitted")) {
-      try {
-        const job = await api.getJob(task.job_id);
-        if (job.delivery_body) {
-          if (isErrorResult(job.delivery_body)) {
-            task.status = "pending";
-            task.attempts++;
-            task.error = job.delivery_body;
-          } else {
-            task.status = "completed";
-            task.result = job.delivery_body;
-            task.completed_at = new Date().toISOString();
-            if (job.swap) campaign.stats.swap_credits_used += job.swap_credit_cost || 1;
-            else campaign.stats.spent_cents += job.price_cents || cfg.price_cents;
-          }
-          consecutiveTimeouts = 0;
-        } else if (["cancelled", "expired"].includes(job.status)) {
-          task.status = "pending";
+          task.submissions.push(sub);
+          task.status = "submitted";
+          if (!task.submitted_at) task.submitted_at = new Date().toISOString();
+          slotsAvailable--;
+        } catch (err) {
           task.attempts++;
-          consecutiveTimeouts++;
-        } else {
-          // Check per-task timeout
-          const elapsed = Date.now() - new Date(task.submitted_at).getTime();
-          if (elapsed > cfg.timeout_ms) {
-            task.status = "pending";
-            task.attempts++;
-            task.error = "timeout";
+          task.error = err.message;
+          if (task.attempts > cfg.max_retries) { task.status = "failed"; break; }
+        }
+      }
+    }
+
+    // Poll all in-flight submissions
+    for (const task of campaign.tasks) {
+      if (task.status !== "submitted") continue;
+      if (!task.submissions) continue;
+
+      for (const sub of task.submissions) {
+        if (sub.status !== "submitted") continue;
+        try {
+          const job = await api.getJob(sub.job_id);
+          if (job.delivery_body) {
+            if (isErrorResult(job.delivery_body)) {
+              sub.status = "failed";
+              sub.error = job.delivery_body;
+            } else {
+              sub.status = "delivered";
+              sub.result = job.delivery_body;
+              if (job.swap) campaign.stats.swap_credits_used += job.swap_credit_cost || 1;
+              else campaign.stats.spent_cents += job.price_cents || cfg.price_cents;
+            }
+            consecutiveTimeouts = 0;
+          } else if (["cancelled", "expired"].includes(job.status)) {
+            sub.status = "failed";
+            sub.error = job.status;
             consecutiveTimeouts++;
+          } else {
+            const elapsed = Date.now() - new Date(sub.submitted_at).getTime();
+            if (elapsed > cfg.timeout_ms) {
+              sub.status = "failed";
+              sub.error = "timeout";
+              consecutiveTimeouts++;
+            }
+          }
+        } catch {
+          // Network error — leave submitted, retry next loop
+        }
+      }
+    }
+
+    // Verify tasks that have enough delivered submissions
+    for (const task of campaign.tasks) {
+      if (task.status !== "submitted") continue;
+      if (!task.submissions) continue;
+
+      const delivered = task.submissions.filter((s) => s.status === "delivered");
+      const inFlight = task.submissions.filter((s) => s.status === "submitted");
+      const failed = task.submissions.filter((s) => s.status === "failed");
+
+      if (redundancy === 1) {
+        // No verification needed — single result
+        if (delivered.length >= 1) {
+          task.result = delivered[0].result;
+          task.job_id = delivered[0].job_id;
+          task.status = "completed";
+          task.completed_at = new Date().toISOString();
+        } else if (inFlight.length === 0 && failed.length > 0) {
+          // All submissions failed — retry or fail the task
+          task.attempts++;
+          task.error = failed[0].error;
+          task.submissions = [];
+          task.status = task.attempts > cfg.max_retries ? "failed" : "pending";
+        }
+      } else {
+        // Redundancy verification
+        if (delivered.length >= redundancy) {
+          // We have enough — run verification
+          const results = delivered.slice(0, redundancy).map((s) => s.result);
+          const v = verifyStrategy(results);
+          task.verification = v;
+
+          if (v.result !== null && v.confidence >= cfg.min_confidence) {
+            task.result = v.result;
+            task.job_id = delivered[0].job_id;
+            task.status = "completed";
+            task.completed_at = new Date().toISOString();
+          } else {
+            // Verification failed — disputed result
+            task.status = "disputed";
+            task.error = `Verification failed: ${v.agreement}/${v.total} agree (confidence ${(v.confidence * 100).toFixed(0)}%)`;
+          }
+        } else if (inFlight.length === 0 && delivered.length + failed.length >= redundancy) {
+          // Not enough delivered, no more in flight — some failed
+          // Retry failed submissions or accept what we have
+          if (delivered.length > 0 && delivered.length >= Math.ceil(redundancy / 2)) {
+            // Have a majority — verify with what we got
+            const results = delivered.map((s) => s.result);
+            const v = verifyStrategy(results);
+            task.verification = v;
+            if (v.result !== null) {
+              task.result = v.result;
+              task.job_id = delivered[0].job_id;
+              task.status = "completed";
+              task.completed_at = new Date().toISOString();
+            } else {
+              task.status = "disputed";
+              task.error = `Partial verification: only ${delivered.length}/${redundancy} delivered`;
+            }
+          } else {
+            // Not enough results — retry
+            task.attempts++;
+            task.submissions = [];
+            task.status = task.attempts > cfg.max_retries ? "failed" : "pending";
           }
         }
-      } catch (err) {
-        // Network error polling — leave submitted, will retry next loop
       }
     }
 
@@ -285,7 +377,7 @@ export async function runCampaign(id, serverConfig) {
 
   // Final state
   if (!paused) {
-    const allDone = campaign.tasks.every((t) => t.status === "completed" || t.status === "failed");
+    const allDone = campaign.tasks.every((t) => ["completed", "failed", "disputed"].includes(t.status));
     campaign.status = allDone ? "completed" : "paused";
   }
 
@@ -294,10 +386,12 @@ export async function runCampaign(id, serverConfig) {
 
   if (campaign.status === "completed") {
     const failed = campaign.tasks.filter((t) => t.status === "failed").length;
+    const disputed = campaign.tasks.filter((t) => t.status === "disputed").length;
     const s = campaign.stats;
     process.stderr.write(
       `\nDone: ${s.completed}/${s.total} complete` +
         (failed > 0 ? `, ${failed} failed` : "") +
+        (disputed > 0 ? `, ${disputed} disputed` : "") +
         ` | ${formatMs(s.elapsed_ms)}` +
         (s.swap_credits_used > 0 ? ` | ${s.swap_credits_used} credits` : "") +
         (s.spent_cents > 0 ? ` | $${(s.spent_cents / 100).toFixed(2)}` : "") +
@@ -314,7 +408,9 @@ export function campaignStatus(id) {
   console.log(`Campaign: ${campaign.id}`);
   console.log(`Status:   ${campaign.status}`);
   console.log(`Tag:      ${campaign.config.tag}`);
-  console.log(`Tasks:    ${s.total} total | ${s.completed} done | ${s.failed} failed | ${s.submitted} in-flight | ${s.pending} pending`);
+  const parts = [`${s.total} total`, `${s.completed} done`, `${s.failed} failed`, `${s.submitted} in-flight`, `${s.pending} pending`];
+  if (s.disputed > 0) parts.push(`${s.disputed} disputed`);
+  console.log(`Tasks:    ${parts.join(" | ")}`);
   if (s.started_at) console.log(`Elapsed:  ${formatMs(s.elapsed_ms)}`);
   if (s.swap_credits_used > 0) console.log(`Credits:  ${s.swap_credits_used}`);
   if (s.spent_cents > 0) console.log(`Spent:    $${(s.spent_cents / 100).toFixed(2)}`);
@@ -389,6 +485,10 @@ function hasPendingOrSubmitted(campaign) {
   return campaign.tasks.some((t) => t.status === "pending" || t.status === "submitted");
 }
 
+function hasActiveWork(campaign) {
+  return campaign.tasks.some((t) => ["pending", "submitted"].includes(t.status));
+}
+
 function isErrorResult(result) {
   return typeof result === "string" && result.startsWith("Error:");
 }
@@ -428,7 +528,8 @@ function printProgress(campaign, final = false) {
   const bar = "#".repeat(filled) + "-".repeat(barLen - filled);
   const elapsed = formatMs(s.elapsed_ms);
   const failStr = s.failed > 0 ? ` | ${s.failed} failed` : "";
-  const line = `[${bar}] ${s.completed}/${s.total}${failStr} | ${s.submitted} in-flight | ${elapsed}`;
+  const disputeStr = s.disputed > 0 ? ` | ${s.disputed} disputed` : "";
+  const line = `[${bar}] ${s.completed}/${s.total}${failStr}${disputeStr} | ${s.submitted} in-flight | ${elapsed}`;
 
   if (process.stderr.isTTY && !final) {
     process.stderr.write(`\r\x1b[K${line}`);

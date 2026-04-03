@@ -461,6 +461,7 @@ const FLAGS_WITH_VALUES = new Set([
   "--template", "--template-file", "--splitter", "--chunk-size",
   "--overlap", "--reducer", "--separator", "--max-retries",
   "--timeout", "--output", "--max-budget", "--stages",
+  "--redundancy", "--verify", "--min-confidence",
 ]);
 
 function isValueOf(args, arg) {
@@ -527,6 +528,12 @@ function parseFlags(args) {
       flags.paid = true;
     } else if (args[i] === "--stages" && args[i + 1]) {
       flags.stages = args[++i];
+    } else if (args[i] === "--redundancy" && args[i + 1]) {
+      flags.redundancy = args[++i];
+    } else if (args[i] === "--verify" && args[i + 1]) {
+      flags.verify = args[++i];
+    } else if (args[i] === "--min-confidence" && args[i + 1]) {
+      flags.min_confidence = args[++i];
     }
   }
   return flags;
@@ -587,6 +594,9 @@ async function cmdCampaign() {
         max_retries: flags.max_retries != null ? parseInt(flags.max_retries) : 2,
         timeout_ms: flags.timeout ? parseInt(flags.timeout) * 1000 : 120000,
         max_budget_cents: flags.max_budget ? Math.round(parseFloat(flags.max_budget) * 100) : 0,
+        redundancy: flags.redundancy ? parseInt(flags.redundancy) : 1,
+        verify: flags.verify || "majority",
+        min_confidence: flags.min_confidence ? parseFloat(flags.min_confidence) : undefined,
       };
 
       const campaign = createCampaign(input, config);
@@ -672,6 +682,9 @@ Options for create:
   --max-budget <dollars>   Max spend in dollars (0 = swap only)
   --timeout <seconds>      Per-task timeout (default: 120)
   --output <path>          Write results to file
+  --redundancy <n>         Submit each task to N sellers for verification (default: 1)
+  --verify <strategy>      majority | consensus | fuzzy | longest (default: majority)
+  --min-confidence <0-1>   Minimum agreement to accept (default: 0.5)
   --run                    Create and immediately run
   --paid                   Use paid credits instead of swap
 
