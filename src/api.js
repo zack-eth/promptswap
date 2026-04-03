@@ -22,7 +22,7 @@ export class NetwircAPI {
   }
 
   // Services
-  registerService(tag, priceCents, description, metadata, { acceptsSwap = true } = {}) {
+  registerService(tag, priceCents, description, metadata, { acceptsSwap = true, swapCreditPrice = null } = {}) {
     const body = {
       tag,
       price_cents: priceCents,
@@ -30,6 +30,7 @@ export class NetwircAPI {
       auto_accept: true,
       accepts_swap: acceptsSwap,
     };
+    if (swapCreditPrice != null) body.swap_credit_price = swapCreditPrice;
     if (metadata) body.metadata = metadata;
     return this.request("POST", "/marketplace/services", body);
   }

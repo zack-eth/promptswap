@@ -182,6 +182,7 @@ async function cmdEarn() {
   config.tag = tag;
   config.tags = [tag];
   if (flags.update) config.update_model = true;
+  if (flags.swap_credit_price != null) config.swap_credit_price = flags.swap_credit_price;
 
   await share(config);
 }
@@ -461,7 +462,7 @@ const FLAGS_WITH_VALUES = new Set([
   "--template", "--template-file", "--splitter", "--chunk-size",
   "--overlap", "--reducer", "--separator", "--max-retries",
   "--timeout", "--output", "--max-budget", "--stages",
-  "--redundancy", "--verify", "--min-confidence",
+  "--redundancy", "--verify", "--min-confidence", "--swap-price",
 ]);
 
 function isValueOf(args, arg) {
@@ -534,6 +535,8 @@ function parseFlags(args) {
       flags.verify = args[++i];
     } else if (args[i] === "--min-confidence" && args[i + 1]) {
       flags.min_confidence = args[++i];
+    } else if (args[i] === "--swap-price" && args[i + 1]) {
+      flags.swap_credit_price = parseInt(args[++i]);
     }
   }
   return flags;

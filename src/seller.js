@@ -16,7 +16,8 @@ export async function share(config) {
       tag,
       config.price_cents,
       `Run any prompt (${tag})`,
-      { provider: tag }
+      { provider: tag },
+      { swapCreditPrice: config.swap_credit_price || null }
     );
   }
 
