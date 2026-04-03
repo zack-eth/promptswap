@@ -91,6 +91,7 @@ export function createCampaign(input, config) {
       max_retries: config.max_retries ?? 2,
       timeout_ms: config.timeout_ms || 120000,
       max_budget_cents: config.max_budget_cents || 0,
+      fallback: config.fallback || null,
     },
     tasks,
     stats: {},
@@ -112,6 +113,13 @@ export async function runCampaign(id, serverConfig) {
 
   const api = new NetwircAPI(serverConfig.server, serverConfig.token);
   const cfg = campaign.config;
+
+  // Pre-flight: check seller availability and resolve fallbacks
+  const resolvedTag = await resolveTag(api, cfg.tag, cfg.fallback);
+  if (resolvedTag !== cfg.tag) {
+    process.stderr.write(`No sellers for "${cfg.tag}" — falling back to "${resolvedTag}"\n`);
+    cfg.tag = resolvedTag;
+  }
 
   campaign.status = "running";
   if (!campaign.stats.started_at) campaign.stats.started_at = new Date().toISOString();
@@ -383,6 +391,33 @@ function hasPendingOrSubmitted(campaign) {
 
 function isErrorResult(result) {
   return typeof result === "string" && result.startsWith("Error:");
+}
+
+const DEFAULT_FALLBACK_CHAIN = ["claude-opus", "claude-sonnet", "claude-haiku", "prompt"];
+
+async function resolveTag(api, tag, fallback) {
+  // Check if requested tag has sellers
+  try {
+    const sellers = await api.searchServices(tag);
+    if (Array.isArray(sellers) && sellers.length > 0) return tag;
+  } catch {
+    // search failed — try fallbacks
+  }
+
+  // Try explicit fallback list, or default chain
+  const chain = fallback || DEFAULT_FALLBACK_CHAIN.filter((t) => t !== tag);
+  for (const candidate of chain) {
+    try {
+      const sellers = await api.searchServices(candidate);
+      if (Array.isArray(sellers) && sellers.length > 0) return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  // Nothing available — return original tag and let it fail naturally
+  process.stderr.write(`Warning: no sellers found for "${tag}" or any fallback\n`);
+  return tag;
 }
 
 function printProgress(campaign, final = false) {

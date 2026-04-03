@@ -66,6 +66,7 @@ export function createPipeline(input, stages, opts = {}) {
         max_concurrent: s.max_concurrent || opts.max_concurrent || 10,
         max_retries: s.max_retries ?? 2,
         timeout_ms: s.timeout_ms || 120000,
+        fallback: s.fallback || null,
       },
       campaign_id: null,
       output: null,
