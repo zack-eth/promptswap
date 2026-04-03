@@ -1,6 +1,6 @@
 {
   "name": "promptswap",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Peer-to-peer prompt marketplace — trade LLM capacity with swap credits",
   "type": "module",
   "bin": {
@@ -15,6 +15,7 @@
   "engines": {
     "node": ">=18"
   },
+  "homepage": "https://promptswap.dev",
   "repository": {
     "type": "git",
     "url": "https://github.com/zack-eth/promptswap.git"
