@@ -1068,3 +1068,104 @@ describe("campaign redundancy", () => {
     try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
   });
 });
+
+// ---------------------------------------------------------------------------
+// x402.js — payment protocol tests
+// ---------------------------------------------------------------------------
+
+import { buildPaymentRequirements, buildPricingResponse, priceUsdc, extractPayerAddress } from "../src/x402.js";
+
+describe("x402", () => {
+  describe("priceUsdc()", () => {
+    it("returns correct USDC price for known tags", () => {
+      assert.equal(priceUsdc("claude-opus"), 0.025);
+      assert.equal(priceUsdc("claude-sonnet"), 0.010);
+      assert.equal(priceUsdc("claude-haiku"), 0.003);
+      assert.equal(priceUsdc("prompt"), 0.001);
+    });
+
+    it("defaults to 0.001 for unknown tags", () => {
+      assert.equal(priceUsdc("unknown-tag"), 0.001);
+    });
+  });
+
+  describe("buildPaymentRequirements()", () => {
+    it("returns valid x402 structure", () => {
+      const req = buildPaymentRequirements("claude-sonnet", "0xABCD");
+      assert.equal(req.x402Version, 1);
+      assert.ok(Array.isArray(req.accepts));
+      assert.equal(req.accepts.length, 1);
+    });
+
+    it("sets correct chain and asset", () => {
+      const req = buildPaymentRequirements("prompt", "0x123");
+      const accept = req.accepts[0];
+      assert.equal(accept.network, "eip155:8453"); // Base
+      assert.equal(accept.asset, "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"); // USDC on Base
+    });
+
+    it("sets payTo from argument", () => {
+      const req = buildPaymentRequirements("prompt", "0xMyWallet");
+      assert.equal(req.accepts[0].payTo, "0xMyWallet");
+    });
+
+    it("calculates correct amount in USDC base units", () => {
+      // claude-sonnet = 10 credits * $0.001 = $0.01 = 10000 units (6 decimals)
+      const req = buildPaymentRequirements("claude-sonnet", "0x0");
+      assert.equal(req.accepts[0].maxAmountRequired, "10000");
+
+      // claude-opus = 25 credits * $0.001 = $0.025 = 25000 units
+      const req2 = buildPaymentRequirements("claude-opus", "0x0");
+      assert.equal(req2.accepts[0].maxAmountRequired, "25000");
+
+      // prompt = 1 credit * $0.001 = $0.001 = 1000 units
+      const req3 = buildPaymentRequirements("prompt", "0x0");
+      assert.equal(req3.accepts[0].maxAmountRequired, "1000");
+    });
+
+    it("includes description with tag", () => {
+      const req = buildPaymentRequirements("claude-opus", "0x0");
+      assert.ok(req.accepts[0].description.includes("claude-opus"));
+    });
+  });
+
+  describe("buildPricingResponse()", () => {
+    it("returns prices for all known tags", () => {
+      const resp = buildPricingResponse();
+      assert.ok(resp.prices["claude-opus"]);
+      assert.ok(resp.prices["claude-sonnet"]);
+      assert.ok(resp.prices["prompt"]);
+    });
+
+    it("includes chain and asset", () => {
+      const resp = buildPricingResponse();
+      assert.equal(resp.chain, "eip155:8453");
+      assert.ok(resp.asset);
+    });
+
+    it("each price has credits, usdc, and usdc_units", () => {
+      const resp = buildPricingResponse();
+      const opus = resp.prices["claude-opus"];
+      assert.equal(opus.credits, 25);
+      assert.equal(opus.usdc, 0.025);
+      assert.equal(opus.usdc_units, "25000");
+    });
+  });
+
+  describe("extractPayerAddress()", () => {
+    it("extracts address from base64 x402 payload", () => {
+      const payload = { payload: { authorization: { from: "0xDEADBEEF" } } };
+      const encoded = Buffer.from(JSON.stringify(payload)).toString("base64");
+      assert.equal(extractPayerAddress(encoded), "0xDEADBEEF");
+    });
+
+    it("returns 0x0 for invalid input", () => {
+      assert.equal(extractPayerAddress("not-valid-base64!!!"), "0x0");
+    });
+
+    it("returns 0x0 for empty payload", () => {
+      const encoded = Buffer.from("{}").toString("base64");
+      assert.equal(extractPayerAddress(encoded), "0x0");
+    });
+  });
+});

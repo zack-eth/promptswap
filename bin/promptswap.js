@@ -444,6 +444,7 @@ async function cmdProxy() {
   const token = await ensureToken();
   const config = load();
   config.token = token;
+  if (flags.x402_wallet) config.x402_wallet = flags.x402_wallet;
   startProxy(config, { port, mode });
 }
 
@@ -462,7 +463,7 @@ const FLAGS_WITH_VALUES = new Set([
   "--template", "--template-file", "--splitter", "--chunk-size",
   "--overlap", "--reducer", "--separator", "--max-retries",
   "--timeout", "--output", "--max-budget", "--stages",
-  "--redundancy", "--verify", "--min-confidence", "--swap-price",
+  "--redundancy", "--verify", "--min-confidence", "--swap-price", "--x402-wallet",
 ]);
 
 function isValueOf(args, arg) {
@@ -537,6 +538,8 @@ function parseFlags(args) {
       flags.min_confidence = args[++i];
     } else if (args[i] === "--swap-price" && args[i + 1]) {
       flags.swap_credit_price = parseInt(args[++i]);
+    } else if (args[i] === "--x402-wallet" && args[i + 1]) {
+      flags.x402_wallet = args[++i];
     }
   }
   return flags;

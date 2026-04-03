@@ -2,6 +2,7 @@ import { createServer } from "http";
 import { randomBytes } from "crypto";
 import { runPromptAsync } from "./providers.js";
 import { NetwircAPI } from "./api.js";
+import { buildPaymentRequirements, buildPricingResponse, verifyAndSettle } from "./x402.js";
 
 const MODEL_MAP = {
   // OpenAI-style names
@@ -28,7 +29,8 @@ const MODELS = Object.keys(MODEL_MAP);
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-PAYMENT",
+  "Access-Control-Expose-Headers": "X-PAYMENT-RESPONSE",
 };
 
 export function startProxy(config, { port = 8787, mode = "default" } = {}) {
@@ -51,9 +53,48 @@ export function startProxy(config, { port = 8787, mode = "default" } = {}) {
       return res.end(JSON.stringify({ object: "list", data }));
     }
 
+    // x402 pricing discovery — public, no auth
+    if (req.method === "GET" && req.url?.startsWith("/v1/x402/price")) {
+      res.writeHead(200, headers);
+      return res.end(JSON.stringify(buildPricingResponse()));
+    }
+
     if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      const hasAuth = req.headers.authorization && req.headers.authorization !== "Bearer local";
+      const hasPayment = !!req.headers["x-payment"];
+      const x402Wallet = config.x402_wallet;
+
+      // x402 gate: if enabled, no auth, and no payment → return 402
+      if (x402Wallet && !hasAuth && !hasPayment) {
+        readBody(req)
+          .then((body) => {
+            const tag = MODEL_MAP[body.model] || body.model || "claude-sonnet";
+            const requirements = buildPaymentRequirements(tag, x402Wallet);
+            res.writeHead(402, headers);
+            res.end(JSON.stringify(requirements));
+          })
+          .catch(() => {
+            const requirements = buildPaymentRequirements("claude-sonnet", x402Wallet);
+            res.writeHead(402, headers);
+            res.end(JSON.stringify(requirements));
+          });
+        return;
+      }
+
       readBody(req)
-        .then((body) => {
+        .then(async (body) => {
+          // x402 payment verification
+          if (hasPayment && x402Wallet) {
+            const tag = MODEL_MAP[body.model] || body.model || "claude-sonnet";
+            const requirements = buildPaymentRequirements(tag, x402Wallet);
+            const settlement = await verifyAndSettle(req.headers["x-payment"], requirements.accepts[0]);
+            if (!settlement.success) {
+              res.writeHead(402, headers);
+              return res.end(JSON.stringify({ error: { message: `Payment failed: ${settlement.error}`, type: "payment_error" } }));
+            }
+            process.stderr.write(`[x402] Payment settled: ${settlement.txHash || "confirmed"}\n`);
+          }
+
           if (body.stream) {
             return handleChatCompletion(body, config, mode).then(({ status, body: respBody }) => {
               if (status !== 200) {
