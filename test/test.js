@@ -469,3 +469,445 @@ describe("config", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// splitters.js — pure logic tests
+// ---------------------------------------------------------------------------
+
+import { SPLITTERS, applyTemplate } from "../src/splitters.js";
+
+describe("splitters", () => {
+  describe("lines", () => {
+    it("splits input by newlines", () => {
+      const result = SPLITTERS.lines("a\nb\nc");
+      assert.deepEqual(result, ["a", "b", "c"]);
+    });
+
+    it("filters empty lines", () => {
+      const result = SPLITTERS.lines("a\n\nb\n  \nc");
+      assert.deepEqual(result, ["a", "b", "c"]);
+    });
+
+    it("handles single line", () => {
+      assert.deepEqual(SPLITTERS.lines("hello"), ["hello"]);
+    });
+
+    it("returns empty array for empty input", () => {
+      assert.deepEqual(SPLITTERS.lines(""), []);
+    });
+  });
+
+  describe("chunks", () => {
+    it("splits into fixed-size chunks", () => {
+      const result = SPLITTERS.chunks("abcdefghij", { chunk_size: 4 });
+      assert.deepEqual(result, ["abcd", "efgh", "ij"]);
+    });
+
+    it("uses default chunk_size of 2000", () => {
+      const input = "x".repeat(5000);
+      const result = SPLITTERS.chunks(input);
+      assert.equal(result.length, 3);
+      assert.equal(result[0].length, 2000);
+    });
+
+    it("handles overlap", () => {
+      const result = SPLITTERS.chunks("abcdefgh", { chunk_size: 4, overlap: 2 });
+      // step = 4 - 2 = 2, chunks at 0,2,4,6
+      assert.equal(result[0], "abcd");
+      assert.equal(result[1], "cdef");
+      assert.equal(result[2], "efgh");
+    });
+
+    it("handles input shorter than chunk_size", () => {
+      const result = SPLITTERS.chunks("hi", { chunk_size: 100 });
+      assert.deepEqual(result, ["hi"]);
+    });
+  });
+
+  describe("json-array", () => {
+    it("splits a JSON array of strings", () => {
+      const result = SPLITTERS["json-array"](JSON.stringify(["a", "b", "c"]));
+      assert.deepEqual(result, ["a", "b", "c"]);
+    });
+
+    it("stringifies non-string elements", () => {
+      const result = SPLITTERS["json-array"](JSON.stringify([{ x: 1 }, { x: 2 }]));
+      assert.deepEqual(result, ['{"x":1}', '{"x":2}']);
+    });
+
+    it("throws on non-array input", () => {
+      assert.throws(() => SPLITTERS["json-array"]('{"a":1}'), /not a JSON array/);
+    });
+  });
+
+  describe("csv-rows", () => {
+    it("splits CSV with header prepended to each row", () => {
+      const input = "name,age\nAlice,30\nBob,25";
+      const result = SPLITTERS["csv-rows"](input);
+      assert.deepEqual(result, ["name,age\nAlice,30", "name,age\nBob,25"]);
+    });
+
+    it("handles single row (just header)", () => {
+      const result = SPLITTERS["csv-rows"]("name,age");
+      assert.deepEqual(result, []);
+    });
+  });
+
+  describe("applyTemplate()", () => {
+    it("replaces {{input}} with the chunk", () => {
+      assert.equal(applyTemplate("Summarize: {{input}}", "hello"), "Summarize: hello");
+    });
+
+    it("replaces multiple {{input}} occurrences", () => {
+      assert.equal(applyTemplate("A: {{input}} B: {{input}}", "x"), "A: x B: x");
+    });
+
+    it("returns chunk when template is null", () => {
+      assert.equal(applyTemplate(null, "hello"), "hello");
+    });
+
+    it("returns chunk unchanged when no placeholder", () => {
+      assert.equal(applyTemplate("no placeholder", "hello"), "no placeholder");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reducers.js — pure logic tests
+// ---------------------------------------------------------------------------
+
+import { REDUCERS } from "../src/reducers.js";
+
+describe("reducers", () => {
+  describe("concat", () => {
+    it("joins results in index order", () => {
+      const results = [
+        { index: 2, result: "c" },
+        { index: 0, result: "a" },
+        { index: 1, result: "b" },
+      ];
+      assert.equal(REDUCERS.concat(results), "a\nb\nc");
+    });
+
+    it("uses custom separator", () => {
+      const results = [
+        { index: 0, result: "x" },
+        { index: 1, result: "y" },
+      ];
+      assert.equal(REDUCERS.concat(results, { separator: " | " }), "x | y");
+    });
+  });
+
+  describe("json-array", () => {
+    it("collects results into a JSON array", () => {
+      const results = [
+        { index: 1, result: '{"b":2}' },
+        { index: 0, result: '{"a":1}' },
+      ];
+      const parsed = JSON.parse(REDUCERS["json-array"](results));
+      assert.deepEqual(parsed, [{ a: 1 }, { b: 2 }]);
+    });
+
+    it("keeps non-JSON results as strings", () => {
+      const results = [{ index: 0, result: "plain text" }];
+      const parsed = JSON.parse(REDUCERS["json-array"](results));
+      assert.deepEqual(parsed, ["plain text"]);
+    });
+  });
+
+  describe("json-merge", () => {
+    it("merges JSON objects in order", () => {
+      const results = [
+        { index: 0, result: '{"a":1}' },
+        { index: 1, result: '{"b":2}' },
+      ];
+      const parsed = JSON.parse(REDUCERS["json-merge"](results));
+      assert.deepEqual(parsed, { a: 1, b: 2 });
+    });
+
+    it("later values override earlier ones", () => {
+      const results = [
+        { index: 0, result: '{"a":1}' },
+        { index: 1, result: '{"a":2}' },
+      ];
+      const parsed = JSON.parse(REDUCERS["json-merge"](results));
+      assert.deepEqual(parsed, { a: 2 });
+    });
+
+    it("skips non-JSON results", () => {
+      const results = [
+        { index: 0, result: '{"a":1}' },
+        { index: 1, result: "not json" },
+      ];
+      const parsed = JSON.parse(REDUCERS["json-merge"](results));
+      assert.deepEqual(parsed, { a: 1 });
+    });
+  });
+
+  describe("none", () => {
+    it("separates results with boundary marker", () => {
+      const results = [
+        { index: 0, result: "first" },
+        { index: 1, result: "second" },
+      ];
+      const output = REDUCERS.none(results);
+      assert.ok(output.includes("===RESULT_BOUNDARY==="));
+      assert.ok(output.startsWith("first"));
+      assert.ok(output.endsWith("second"));
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// campaign.js — state management tests (no network)
+// ---------------------------------------------------------------------------
+
+import { createCampaign } from "../src/campaign.js";
+
+describe("campaign", () => {
+  const campaignsDir = join(homedir(), ".promptswap", "campaigns");
+
+  describe("createCampaign()", () => {
+    it("creates a campaign with correct task count", () => {
+      const campaign = createCampaign("line1\nline2\nline3", {
+        splitter: "lines",
+        reducer: "concat",
+        tag: "prompt",
+      });
+      assert.equal(campaign.tasks.length, 3);
+      assert.equal(campaign.status, "created");
+      assert.ok(campaign.id.startsWith("camp_"));
+      // Clean up
+      try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+    });
+
+    it("applies template to each task", () => {
+      const campaign = createCampaign("hello\nworld", {
+        splitter: "lines",
+        reducer: "concat",
+        template: "Say: {{input}}",
+        tag: "prompt",
+      });
+      assert.equal(campaign.tasks[0].prompt, "Say: hello");
+      assert.equal(campaign.tasks[1].prompt, "Say: world");
+      try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+    });
+
+    it("persists campaign to disk", () => {
+      const campaign = createCampaign("a\nb", {
+        splitter: "lines",
+        reducer: "concat",
+        tag: "prompt",
+      });
+      const path = join(campaignsDir, `${campaign.id}.json`);
+      assert.ok(existsSync(path));
+      const loaded = JSON.parse(readFileSync(path, "utf-8"));
+      assert.equal(loaded.id, campaign.id);
+      assert.equal(loaded.tasks.length, 2);
+      try { rmSync(path); } catch {}
+    });
+
+    it("throws on unknown splitter", () => {
+      assert.throws(() => createCampaign("x", { splitter: "nope", reducer: "concat" }), /Unknown splitter/);
+    });
+
+    it("throws on unknown reducer", () => {
+      assert.throws(() => createCampaign("x", { splitter: "lines", reducer: "nope" }), /Unknown reducer/);
+    });
+
+    it("throws when splitter produces 0 tasks", () => {
+      assert.throws(() => createCampaign("", { splitter: "lines", reducer: "concat" }), /0 tasks/);
+    });
+
+    it("all tasks start as pending", () => {
+      const campaign = createCampaign("a\nb\nc", {
+        splitter: "lines",
+        reducer: "concat",
+        tag: "prompt",
+      });
+      for (const task of campaign.tasks) {
+        assert.equal(task.status, "pending");
+        assert.equal(task.attempts, 0);
+        assert.equal(task.job_id, null);
+      }
+      try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+    });
+
+    it("stores config correctly", () => {
+      const campaign = createCampaign("x\ny", {
+        splitter: "lines",
+        reducer: "json-array",
+        tag: "claude-opus",
+        max_concurrent: 5,
+        max_retries: 3,
+        timeout_ms: 60000,
+      });
+      assert.equal(campaign.config.tag, "claude-opus");
+      assert.equal(campaign.config.reducer, "json-array");
+      assert.equal(campaign.config.max_concurrent, 5);
+      assert.equal(campaign.config.max_retries, 3);
+      assert.equal(campaign.config.timeout_ms, 60000);
+      try { rmSync(join(campaignsDir, `${campaign.id}.json`)); } catch {}
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pipeline.js — state management tests (no network)
+// ---------------------------------------------------------------------------
+
+import { createPipeline, loadPipeline, cancelPipeline, pipelineResults, listPipelines } from "../src/pipeline.js";
+
+describe("pipeline", () => {
+  const pipelinesDir = join(homedir(), ".promptswap", "pipelines");
+  const campaignsDir = join(homedir(), ".promptswap", "campaigns");
+
+  describe("createPipeline()", () => {
+    it("creates a pipeline with correct stage count", () => {
+      const pipeline = createPipeline("a\nb\nc", [
+        { splitter: "lines", template: "Summarize: {{input}}", reducer: "concat" },
+        { splitter: "chunks", template: "Synthesize: {{input}}", reducer: "concat" },
+      ]);
+      assert.equal(pipeline.stages.length, 2);
+      assert.equal(pipeline.status, "created");
+      assert.ok(pipeline.id.startsWith("pipe_"));
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+
+    it("persists pipeline to disk", () => {
+      const pipeline = createPipeline("test input", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]);
+      const path = join(pipelinesDir, `${pipeline.id}.json`);
+      assert.ok(existsSync(path));
+      const loaded = JSON.parse(readFileSync(path, "utf-8"));
+      assert.equal(loaded.id, pipeline.id);
+      assert.equal(loaded.stages.length, 2);
+      try { rmSync(path); } catch {}
+    });
+
+    it("stores initial input", () => {
+      const pipeline = createPipeline("my data here", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]);
+      assert.equal(pipeline.initial_input, "my data here");
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+
+    it("throws with fewer than 2 stages", () => {
+      assert.throws(() => createPipeline("x", [
+        { splitter: "lines", reducer: "concat" },
+      ]), /at least 2 stages/);
+    });
+
+    it("throws when stage missing splitter", () => {
+      assert.throws(() => createPipeline("x", [
+        { reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]), /splitter is required/);
+    });
+
+    it("throws when stage missing reducer", () => {
+      assert.throws(() => createPipeline("x", [
+        { splitter: "lines" },
+        { splitter: "lines", reducer: "concat" },
+      ]), /reducer is required/);
+    });
+
+    it("all stages start as pending", () => {
+      const pipeline = createPipeline("data", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "chunks", reducer: "json-array" },
+      ]);
+      for (const stage of pipeline.stages) {
+        assert.equal(stage.status, "pending");
+        assert.equal(stage.campaign_id, null);
+        assert.equal(stage.output, null);
+      }
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+
+    it("preserves per-stage config", () => {
+      const pipeline = createPipeline("data", [
+        { splitter: "lines", template: "First: {{input}}", reducer: "concat" },
+        { splitter: "chunks", template: "Second: {{input}}", reducer: "json-array", chunk_size: 500 },
+      ]);
+      assert.equal(pipeline.stages[0].config.template, "First: {{input}}");
+      assert.equal(pipeline.stages[1].config.template, "Second: {{input}}");
+      assert.equal(pipeline.stages[1].config.splitter, "chunks");
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+
+    it("inherits global tag and options", () => {
+      const pipeline = createPipeline("data", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ], { tag: "claude-opus", max_concurrent: 25 });
+      assert.equal(pipeline.tag, "claude-opus");
+      assert.equal(pipeline.max_concurrent, 25);
+      assert.equal(pipeline.stages[0].config.tag, "claude-opus");
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+  });
+
+  describe("loadPipeline()", () => {
+    it("loads a saved pipeline", () => {
+      const pipeline = createPipeline("x\ny", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]);
+      const loaded = loadPipeline(pipeline.id);
+      assert.equal(loaded.id, pipeline.id);
+      assert.equal(loaded.stages.length, 2);
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+
+    it("throws for non-existent pipeline", () => {
+      assert.throws(() => loadPipeline("pipe_nonexistent"), /not found/);
+    });
+  });
+
+  describe("cancelPipeline()", () => {
+    it("sets status to failed", () => {
+      const pipeline = createPipeline("x\ny", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]);
+      cancelPipeline(pipeline.id);
+      const loaded = loadPipeline(pipeline.id);
+      assert.equal(loaded.status, "failed");
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+  });
+
+  describe("pipelineResults()", () => {
+    it("returns null when no stages completed", () => {
+      const pipeline = createPipeline("data", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]);
+      const result = pipelineResults(pipeline.id);
+      assert.equal(result, null);
+      try { rmSync(join(pipelinesDir, `${pipeline.id}.json`)); } catch {}
+    });
+
+    it("returns final_output when pipeline is complete", () => {
+      const pipeline = createPipeline("data", [
+        { splitter: "lines", reducer: "concat" },
+        { splitter: "lines", reducer: "concat" },
+      ]);
+      // Manually set final_output to simulate completion
+      const path = join(pipelinesDir, `${pipeline.id}.json`);
+      const p = JSON.parse(readFileSync(path, "utf-8"));
+      p.status = "completed";
+      p.final_output = "the final answer";
+      writeFileSync(path, JSON.stringify(p, null, 2) + "\n");
+
+      const result = pipelineResults(pipeline.id);
+      assert.equal(result, "the final answer");
+      try { rmSync(path); } catch {}
+    });
+  });
+});

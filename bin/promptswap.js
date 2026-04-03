@@ -11,6 +11,8 @@ import { installHook, uninstallHook } from "../src/hooks.js";
 import { setup } from "../src/setup.js";
 import { ensureToken } from "../src/auth.js";
 import { startProxy } from "../src/proxy.js";
+import { createCampaign, runCampaign, campaignStatus, campaignResults, listCampaigns, cancelCampaign } from "../src/campaign.js";
+import { createPipeline, runPipeline, pipelineStatus, pipelineResults, listPipelines, cancelPipeline } from "../src/pipeline.js";
 import { homedir } from "os";
 import { join } from "path";
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -72,6 +74,12 @@ async function main() {
       break;
     case "connect":
       await cmdConnect();
+      break;
+    case "campaign":
+      await cmdCampaign();
+      break;
+    case "pipeline":
+      await cmdPipeline();
       break;
     case "install-hook":
       installHook();
@@ -450,6 +458,9 @@ function requireToken() {
 const FLAGS_WITH_VALUES = new Set([
   "--price", "--seller", "--tag", "--tags", "--poll",
   "--model", "--max-spend", "--max-concurrent", "--port",
+  "--template", "--template-file", "--splitter", "--chunk-size",
+  "--overlap", "--reducer", "--separator", "--max-retries",
+  "--timeout", "--output", "--max-budget", "--stages",
 ]);
 
 function isValueOf(args, arg) {
@@ -488,6 +499,34 @@ function parseFlags(args) {
       flags.marketplace = true;
     } else if (args[i] === "--local") {
       flags.local = true;
+    } else if (args[i] === "--template" && args[i + 1]) {
+      flags.template = args[++i];
+    } else if (args[i] === "--template-file" && args[i + 1]) {
+      flags.template_file = args[++i];
+    } else if (args[i] === "--splitter" && args[i + 1]) {
+      flags.splitter = args[++i];
+    } else if (args[i] === "--chunk-size" && args[i + 1]) {
+      flags.chunk_size = args[++i];
+    } else if (args[i] === "--overlap" && args[i + 1]) {
+      flags.overlap = args[++i];
+    } else if (args[i] === "--reducer" && args[i + 1]) {
+      flags.reducer = args[++i];
+    } else if (args[i] === "--separator" && args[i + 1]) {
+      flags.separator = args[++i];
+    } else if (args[i] === "--max-retries" && args[i + 1]) {
+      flags.max_retries = args[++i];
+    } else if (args[i] === "--timeout" && args[i + 1]) {
+      flags.timeout = args[++i];
+    } else if (args[i] === "--output" && args[i + 1]) {
+      flags.output = args[++i];
+    } else if (args[i] === "--max-budget" && args[i + 1]) {
+      flags.max_budget = args[++i];
+    } else if (args[i] === "--run") {
+      flags.run = true;
+    } else if (args[i] === "--paid") {
+      flags.paid = true;
+    } else if (args[i] === "--stages" && args[i + 1]) {
+      flags.stages = args[++i];
     }
   }
   return flags;
@@ -500,6 +539,273 @@ function readStdin() {
     process.stdin.on("data", (chunk) => (data += chunk));
     process.stdin.on("end", () => resolve(data.trim()));
   });
+}
+
+async function cmdCampaign() {
+  const sub = args[0];
+  const subArgs = args.slice(1);
+  const flags = parseFlags(subArgs);
+
+  switch (sub) {
+    case "create": {
+      const inputArg = subArgs.find((a) => !a.startsWith("-") && !isValueOf(subArgs, a));
+      if (!inputArg) {
+        console.error("Usage: promptswap campaign create <input-file> [options]");
+        console.error("       Use - for stdin");
+        return;
+      }
+
+      let input;
+      if (inputArg === "-") {
+        input = await readStdin();
+      } else {
+        input = readFileSync(inputArg, "utf-8");
+      }
+
+      let template = flags.template || "{{input}}";
+      if (flags.template_file) {
+        template = readFileSync(flags.template_file, "utf-8").trim();
+      }
+
+      const config = {
+        tag: flags.tag || load().tag || "prompt",
+        template,
+        splitter: flags.splitter || "lines",
+        splitter_opts: {
+          chunk_size: flags.chunk_size ? parseInt(flags.chunk_size) : undefined,
+          overlap: flags.overlap ? parseInt(flags.overlap) : undefined,
+        },
+        reducer: flags.reducer || "concat",
+        reducer_opts: {
+          separator: flags.separator,
+        },
+        input_file: inputArg !== "-" ? inputArg : null,
+        swap: !flags.paid,
+        price_cents: flags.price_cents || load().price_cents || 5,
+        seller: flags.seller || null,
+        max_concurrent: flags.max_concurrent || 10,
+        max_retries: flags.max_retries != null ? parseInt(flags.max_retries) : 2,
+        timeout_ms: flags.timeout ? parseInt(flags.timeout) * 1000 : 120000,
+        max_budget_cents: flags.max_budget ? Math.round(parseFloat(flags.max_budget) * 100) : 0,
+      };
+
+      const campaign = createCampaign(input, config);
+
+      if (flags.run) {
+        const serverConfig = requireToken();
+        await runCampaign(campaign.id, serverConfig);
+        campaignResults(campaign.id, { output: flags.output });
+      }
+      break;
+    }
+
+    case "run": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (!id) {
+        console.error("Usage: promptswap campaign run <campaign-id>");
+        return;
+      }
+      const serverConfig = requireToken();
+      const campaign = await runCampaign(id, serverConfig);
+      if (campaign.status === "completed") {
+        campaignResults(id, { output: flags.output });
+      }
+      break;
+    }
+
+    case "status": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (id) {
+        campaignStatus(id);
+      } else {
+        listCampaigns();
+      }
+      break;
+    }
+
+    case "results": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (!id) {
+        console.error("Usage: promptswap campaign results <campaign-id>");
+        return;
+      }
+      campaignResults(id, { output: flags.output });
+      break;
+    }
+
+    case "list":
+      listCampaigns();
+      break;
+
+    case "cancel": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (!id) {
+        console.error("Usage: promptswap campaign cancel <campaign-id>");
+        return;
+      }
+      cancelCampaign(id);
+      break;
+    }
+
+    default:
+      console.log(`promptswap campaign <subcommand>
+
+Subcommands:
+  create <input-file> [options]   Create a campaign from input data
+  run <campaign-id>               Run or resume a campaign
+  status [campaign-id]            Show progress (or list all)
+  results <campaign-id>           Output aggregated results
+  list                            List all campaigns
+  cancel <campaign-id>            Cancel a campaign
+
+Options for create:
+  --tag <tag>              Model tag (default: prompt)
+  --template <string>      Prompt template with {{input}} placeholder
+  --template-file <path>   Read template from file
+  --splitter <name>        lines | chunks | json-array | csv-rows | file-list
+  --chunk-size <n>         For chunks splitter (default: 2000)
+  --overlap <n>            For chunks splitter (default: 0)
+  --reducer <name>         concat | json-array | json-merge | none
+  --separator <string>     For concat reducer (default: \\n)
+  --max-concurrent <n>     Parallel jobs (default: 10)
+  --max-retries <n>        Retries per task (default: 2)
+  --max-budget <dollars>   Max spend in dollars (0 = swap only)
+  --timeout <seconds>      Per-task timeout (default: 120)
+  --output <path>          Write results to file
+  --run                    Create and immediately run
+  --paid                   Use paid credits instead of swap
+
+Examples:
+  promptswap campaign create papers.txt --splitter lines \\
+    --template "Summarize in 3 bullets:\\n\\n{{input}}" \\
+    --reducer json-array --run
+
+  promptswap campaign status camp_a1b2c3d4
+  promptswap campaign run camp_a1b2c3d4
+  promptswap campaign results camp_a1b2c3d4 --output results.json`);
+  }
+}
+
+async function cmdPipeline() {
+  const sub = args[0];
+  const subArgs = args.slice(1);
+  const flags = parseFlags(subArgs);
+
+  switch (sub) {
+    case "create": {
+      const inputArg = subArgs.find((a) => !a.startsWith("-") && !isValueOf(subArgs, a));
+      if (!inputArg || !flags.stages) {
+        console.error("Usage: promptswap pipeline create <input-file> --stages <stages.json> [options]");
+        console.error("       Use - for stdin");
+        return;
+      }
+
+      let input;
+      if (inputArg === "-") {
+        input = await readStdin();
+      } else {
+        input = readFileSync(inputArg, "utf-8");
+      }
+
+      const stages = JSON.parse(readFileSync(flags.stages, "utf-8"));
+
+      const pipeline = createPipeline(input, stages, {
+        input_file: inputArg !== "-" ? inputArg : null,
+        tag: flags.tag || load().tag || "prompt",
+        swap: !flags.paid,
+        price_cents: flags.price_cents || load().price_cents || 5,
+        seller: flags.seller || null,
+        max_concurrent: flags.max_concurrent || 10,
+      });
+
+      if (flags.run) {
+        const serverConfig = requireToken();
+        const result = await runPipeline(pipeline.id, serverConfig);
+        if (result.status === "completed") {
+          pipelineResults(pipeline.id, { output: flags.output });
+        }
+      }
+      break;
+    }
+
+    case "run": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (!id) {
+        console.error("Usage: promptswap pipeline run <pipeline-id>");
+        return;
+      }
+      const serverConfig = requireToken();
+      const result = await runPipeline(id, serverConfig);
+      if (result.status === "completed") {
+        pipelineResults(id, { output: flags.output });
+      }
+      break;
+    }
+
+    case "status": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (id) {
+        pipelineStatus(id);
+      } else {
+        listPipelines();
+      }
+      break;
+    }
+
+    case "results": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (!id) {
+        console.error("Usage: promptswap pipeline results <pipeline-id>");
+        return;
+      }
+      pipelineResults(id, { output: flags.output });
+      break;
+    }
+
+    case "list":
+      listPipelines();
+      break;
+
+    case "cancel": {
+      const id = subArgs.find((a) => !a.startsWith("-"));
+      if (!id) {
+        console.error("Usage: promptswap pipeline cancel <pipeline-id>");
+        return;
+      }
+      cancelPipeline(id);
+      break;
+    }
+
+    default:
+      console.log(`promptswap pipeline <subcommand>
+
+Multi-stage pipelines — chain campaigns where output feeds into the next stage.
+
+Subcommands:
+  create <input-file> --stages <stages.json> [options]
+  run <pipeline-id>               Run or resume a pipeline
+  status [pipeline-id]            Show progress (or list all)
+  results <pipeline-id>           Output final results
+  list                            List all pipelines
+  cancel <pipeline-id>            Cancel a pipeline
+
+Options:
+  --stages <path>          JSON file defining pipeline stages (required)
+  --tag <tag>              Default model tag for all stages
+  --max-concurrent <n>     Default parallel jobs per stage
+  --output <path>          Write final results to file
+  --run                    Create and immediately run
+  --paid                   Use paid credits instead of swap
+
+stages.json format:
+  [
+    { "splitter": "lines", "template": "Summarize: {{input}}", "reducer": "concat" },
+    { "splitter": "chunks", "template": "Synthesize:\\n\\n{{input}}", "reducer": "concat", "chunk_size": 3000 }
+  ]
+
+Example:
+  promptswap pipeline create papers.txt --stages summarize-pipeline.json --run`);
+  }
 }
 
 function usage() {
@@ -518,6 +824,10 @@ Commands:
                           --marketplace   marketplace only
   connect <tool>          Connect a tool (cursor, continue, openclaw, python, curl)
                           --local         use local proxy instead of marketplace
+  campaign <sub>          Distributed task orchestration (SETI@Home for LLMs)
+                          create, run, status, results, list, cancel
+  pipeline <sub>          Multi-stage pipelines — chain campaigns together
+                          create, run, status, results, list, cancel
 
 Models:
   ollama                  Local Ollama (free, auto-installs)
